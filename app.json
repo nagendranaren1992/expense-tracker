@@ -1,0 +1,32 @@
+{
+  "expo": {
+    "name": "Expense Tracker",
+    "slug": "expense-tracker",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "platforms": [
+      "ios",
+      "android",
+      "web"
+    ],
+    "splash": {
+      "backgroundColor": "#0E1116"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.example.expensetracker"
+    },
+    "android": {
+      "package": "com.example.expensetracker"
+    },
+    "web": {
+      "bundler": "metro"
+    },
+    "scheme": "expensetracker",
+    "plugins": [
+      "expo-web-browser",
+      "expo-dev-client"
+    ]
+  }
+}
