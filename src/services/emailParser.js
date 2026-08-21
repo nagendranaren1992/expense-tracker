@@ -375,10 +375,9 @@ export function parseTransactionEmail(email) {
   if (!type) return null;
 
   const account = extractLast4(text);
-  // Only keep spends that map to one of the user's cards — drops promo /
-  // investment mails (e.g. India Bonds) that have no card last-4.
-  const knownCard = account && MY_ACCOUNTS.some((a) => a.last4 === account);
-  if (!knownCard) return null;
+  // Require a card/account last-4 so promo/investment mails without one drop.
+  // Any discovered last-4 is kept (multi-user — not limited to MY_ACCOUNTS).
+  if (!account) return null;
 
   const merchant = extractMerchant(text) || (type === 'credit' ? 'Credit' : 'Unknown');
   if (isBadMerchant(merchant) && merchant !== 'Credit' && merchant !== 'Unknown') return null;

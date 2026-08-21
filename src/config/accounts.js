@@ -1,3 +1,7 @@
+// Optional nicknames for cards you know by last-4.
+// Other users discover accounts from their synced emails; unknown last-4s
+// still show as •••• 1234. Add entries here only for nicer chip labels.
+
 export const MY_ACCOUNTS = [
   { last4: '6008', label: 'ICICI', type: 'credit' },
   { last4: '7773', label: 'HDFC', type: 'credit' },

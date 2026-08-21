@@ -1,17 +1,16 @@
 import React, { useMemo, useState, useCallback } from 'react';
 import { View, ScrollView, Pressable, Text, StyleSheet } from 'react-native';
 import { colors, spacing, radius, type } from '../theme';
-import { MY_ACCOUNTS, accountLabel } from '../config/accounts';
+import { accountLabel } from '../config/accounts';
 
 const THUMB = 40;
 
-// Always show every card from MY_ACCOUNTS, even if Sync hasn't found spends yet.
+// Chips come from this user's synced transactions (plus "All accounts").
 export default function AccountFilter({ accounts = [], value, onChange }) {
-  const options = useMemo(() => {
-    const configured = MY_ACCOUNTS.map((a) => a.last4);
-    const extras = (accounts || []).filter((a) => a && !configured.includes(a));
-    return ['all', ...configured, ...extras];
-  }, [accounts]);
+  const options = useMemo(
+    () => ['all', ...(accounts || []).filter(Boolean)],
+    [accounts]
+  );
 
   const [metrics, setMetrics] = useState({
     contentW: 0,

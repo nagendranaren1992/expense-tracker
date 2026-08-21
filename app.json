@@ -1,32 +1,46 @@
 {
   "expo": {
-    "name": "Expense Tracker",
+    "name": "Spends",
     "slug": "expense-tracker",
     "version": "0.1.0",
     "orientation": "portrait",
-    "userInterfaceStyle": "light",
+    "userInterfaceStyle": "dark",
+    "icon": "./assets/icon.png",
     "platforms": [
       "ios",
       "android",
       "web"
     ],
     "splash": {
+      "image": "./assets/icon.png",
+      "resizeMode": "contain",
       "backgroundColor": "#0E1116"
     },
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.example.expensetracker"
+      "bundleIdentifier": "com.example.expensetracker",
+      "icon": "./assets/icon.png"
     },
     "android": {
-      "package": "com.example.expensetracker"
+      "package": "com.example.expensetracker",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#0E1116"
+      }
     },
     "web": {
-      "bundler": "metro"
+      "bundler": "metro",
+      "favicon": "./assets/favicon.png",
+      "name": "Spends",
+      "shortName": "Spends",
+      "themeColor": "#0E1116",
+      "backgroundColor": "#0E1116"
     },
     "scheme": "expensetracker",
     "plugins": [
       "expo-web-browser",
-      "expo-dev-client"
+      "expo-dev-client",
+      "expo-font"
     ]
   }
 }

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState, useCallback } from 'react';
+import React, { useEffect, useMemo, useState, useCallback, useRef } from 'react';
 import {
   View,
   Text,
@@ -19,6 +19,8 @@ import {
   addTransactions,
   removeSampleData,
   clearTransactions,
+  setActiveUser,
+  migrateLegacyIfNeeded,
 } from './src/data/storage';
 import {
   onlySpends,
@@ -30,8 +32,21 @@ import {
   previousPeriodTotal,
 } from './src/utils/aggregate';
 import { isSameDay, relativeDay, prettyRange } from './src/utils/dates';
-import { isGmailConfigured, useGmailAuth, fetchAndParse, gmailSetupHint } from './src/services/gmail';
+import {
+  isGmailConfigured,
+  useGmailAuth,
+  fetchAndParse,
+  gmailSetupHint,
+} from './src/services/gmail';
+import {
+  getSession,
+  saveSession,
+  clearSession,
+  fetchGoogleProfile,
+  isAuthError,
+} from './src/services/auth';
 
+import LoginScreen from './src/components/LoginScreen';
 import SummaryCard from './src/components/SummaryCard';
 import PeriodToggle from './src/components/PeriodToggle';
 import DateRangeModal from './src/components/DateRangeModal';
@@ -41,9 +56,11 @@ import CategoryBreakdown from './src/components/CategoryBreakdown';
 import TransactionList from './src/components/TransactionList';
 
 export default function App() {
+  const [authReady, setAuthReady] = useState(false);
+  const [session, setSession] = useState(null);
   const [txs, setTxs] = useState([]);
   const [period, setPeriod] = useState('daily');
-  const [customRange, setCustomRange] = useState(null); // { from, to }
+  const [customRange, setCustomRange] = useState(null);
   const [rangeOpen, setRangeOpen] = useState(false);
   const [account, setAccount] = useState('all');
   const [selectedDay, setSelectedDay] = useState(null);
@@ -51,6 +68,19 @@ export default function App() {
   const [syncing, setSyncing] = useState(false);
   const [confirmReset, setConfirmReset] = useState(false);
   const [status, setStatus] = useState('');
+  const authIntentRef = useRef(null); // 'login' | 'sync'
+  // expo-auth-session keeps the last success response; without these, Log out
+  // clears session then the effect re-runs and signs the user straight back in.
+  const acceptAuthRef = useRef(true);
+  const lastHandledAuthRef = useRef(null);
+  const sessionRef = useRef(null);
+  const authEpochRef = useRef(0);
+
+  const [gmailRequest, gmailResponse, promptGmail] = useGmailAuth();
+
+  useEffect(() => {
+    sessionRef.current = session;
+  }, [session]);
 
   const load = useCallback(async () => {
     await ensureSeeded();
@@ -58,80 +88,214 @@ export default function App() {
     setTxs(list);
   }, []);
 
+  // Restore session on launch
   useEffect(() => {
-    load();
-  }, [load]);
+    (async () => {
+      try {
+        const s = await getSession();
+        if (s?.userId) {
+          setActiveUser(s.userId);
+          await migrateLegacyIfNeeded(s.userId);
+          setSession(s);
+          await ensureSeeded();
+          const list = await getTransactions();
+          setTxs(list);
+        }
+      } catch (e) {
+        console.warn('session restore failed', e);
+      } finally {
+        setAuthReady(true);
+      }
+    })();
+  }, []);
 
-  const [gmailRequest, gmailResponse, promptGmail] = useGmailAuth();
+  const applySession = useCallback(async (profile, accessToken) => {
+    const next = {
+      userId: profile.userId,
+      email: profile.email,
+      name: profile.name,
+      picture: profile.picture,
+      accessToken: accessToken || undefined,
+      signedInAt: new Date().toISOString(),
+    };
+    setActiveUser(next.userId);
+    await migrateLegacyIfNeeded(next.userId);
+    await saveSession(next);
+    setSession(next);
+    return next;
+  }, []);
+
+  const runSync = useCallback(
+    async (accessToken, epoch) => {
+      setStatus('Fetching your bank alerts…');
+      const result = await fetchAndParse(accessToken, { days: 14 });
+      if (epoch !== undefined && epoch !== authEpochRef.current) return;
+      const parsed = result.transactions;
+      setStatus('Cleaning up sample data…');
+      await removeSampleData();
+      if (epoch !== undefined && epoch !== authEpochRef.current) return;
+      const added = await addTransactions(parsed);
+      await load();
+      if (epoch !== undefined && epoch !== authEpochRef.current) return;
+
+      if (parsed.length > 0) {
+        setStatus(
+          `Scanned ${result.scanned} email${result.scanned === 1 ? '' : 's'}, ` +
+            `loaded ${added} transaction${added === 1 ? '' : 's'}.`
+        );
+      } else if (result.scanned === 0) {
+        setStatus(
+          'No bank alert emails found in the last 14 days. Your bank may send from ' +
+            "an address the app doesn't know yet — tell me the sender and I'll add it."
+        );
+      } else {
+        setStatus(
+          `Found ${result.scanned} email${result.scanned === 1 ? '' : 's'} but couldn't ` +
+            "read any as transactions. Send me one alert email and I'll fix the parser."
+        );
+      }
+    },
+    [load]
+  );
 
   useEffect(() => {
     const run = async () => {
-      if (gmailResponse?.type === 'success') {
+      if (!gmailResponse) return;
+      if (!acceptAuthRef.current) return;
+
+      const authKey = [
+        gmailResponse.type,
+        gmailResponse.authentication?.accessToken || '',
+        gmailResponse.error?.message || gmailResponse.errorCode || '',
+      ].join('|');
+      if (lastHandledAuthRef.current === authKey) return;
+      lastHandledAuthRef.current = authKey;
+
+      const epoch = authEpochRef.current;
+
+      if (gmailResponse.type === 'success') {
         const token = gmailResponse.authentication?.accessToken;
         if (!token) {
           setStatus('Signed in, but no access token came back.');
           setSyncing(false);
+          authIntentRef.current = null;
           return;
         }
         try {
-          setStatus('Fetching your bank alerts…');
-          const result = await fetchAndParse(token, { days: 14 });
-          const parsed = result.transactions;
-          setStatus('Cleaning up sample data…');
-          await removeSampleData();
-          const added = await addTransactions(parsed);
-          await load();
-
-          if (parsed.length > 0) {
+          setStatus('Signing you in…');
+          const profile = await fetchGoogleProfile(token);
+          if (epoch !== authEpochRef.current || !acceptAuthRef.current) return;
+          const currentUserId = sessionRef.current?.userId;
+          if (currentUserId && profile.userId !== currentUserId) {
             setStatus(
-              `Scanned ${result.scanned} email${result.scanned === 1 ? '' : 's'}, ` +
-                `loaded ${added} transaction${added === 1 ? '' : 's'}. Sample data removed.`
+              'That Google account is different from the one signed in. Log out first to switch.'
             );
-          } else if (result.scanned === 0) {
-            setStatus(
-              'No bank alert emails found in the last 7 days. Your bank may send from ' +
-                "an address the app doesn't know yet — tell me the sender and I'll add it."
-            );
-          } else {
-            setStatus(
-              `Found ${result.scanned} email${result.scanned === 1 ? '' : 's'} but couldn't ` +
-                'read any as transactions. Send me one alert email and I\'ll fix the parser.'
-            );
+            return;
           }
+          await applySession(profile, token);
+          if (epoch !== authEpochRef.current || !acceptAuthRef.current) return;
+
+          const intent = authIntentRef.current || 'sync';
+          if (intent === 'login') {
+            setStatus('Signed in. Syncing your bank alerts…');
+          }
+          await runSync(token, epoch);
         } catch (e) {
-          setStatus('Sync failed: ' + e.message);
+          if (epoch === authEpochRef.current && acceptAuthRef.current) {
+            setStatus('Sign-in / sync failed: ' + e.message);
+          }
         } finally {
-          setSyncing(false);
+          if (epoch === authEpochRef.current) {
+            setSyncing(false);
+            authIntentRef.current = null;
+          }
         }
-      } else if (gmailResponse?.type === 'error') {
+      } else if (gmailResponse.type === 'error') {
         setStatus('Google sign-in error: ' + (gmailResponse.error?.message || 'unknown'));
         setSyncing(false);
+        authIntentRef.current = null;
       } else if (
-        gmailResponse?.type === 'dismiss' ||
-        gmailResponse?.type === 'cancel'
+        gmailResponse.type === 'dismiss' ||
+        gmailResponse.type === 'cancel'
       ) {
         setStatus('Sign-in cancelled.');
         setSyncing(false);
+        authIntentRef.current = null;
       }
     };
     run();
-  }, [gmailResponse, load]);
+  }, [gmailResponse, applySession, runSync]);
+
+  const startGoogle = useCallback(
+    async (intent) => {
+      if (!isGmailConfigured()) {
+        setStatus(gmailSetupHint());
+        return;
+      }
+      acceptAuthRef.current = true;
+      lastHandledAuthRef.current = null;
+      authIntentRef.current = intent;
+      setSyncing(true);
+      setStatus(intent === 'login' ? 'Opening Google sign-in…' : 'Opening Google…');
+      await promptGmail();
+    },
+    [promptGmail]
+  );
+
+  const onSignIn = useCallback(() => startGoogle('login'), [startGoogle]);
+
+  const onLogout = useCallback(async () => {
+    // Ignore sticky OAuth success + any in-flight sync so we stay on login.
+    acceptAuthRef.current = false;
+    authEpochRef.current += 1;
+    authIntentRef.current = null;
+    if (gmailResponse) {
+      lastHandledAuthRef.current = [
+        gmailResponse.type,
+        gmailResponse.authentication?.accessToken || '',
+        gmailResponse.error?.message || gmailResponse.errorCode || '',
+      ].join('|');
+    }
+    setSyncing(false);
+    await clearSession();
+    setActiveUser(null);
+    setSession(null);
+    setTxs([]);
+    setAccount('all');
+    setStatus('');
+    setConfirmReset(false);
+  }, [gmailResponse]);
 
   const onRefresh = useCallback(async () => {
+    if (!session) return;
     setRefreshing(true);
     await load();
     setRefreshing(false);
-  }, [load]);
+  }, [load, session]);
 
   const onSync = useCallback(async () => {
-    if (isGmailConfigured()) {
-      setSyncing(true);
-      setStatus('Opening Google sign-in…');
-      await promptGmail();
-    } else {
+    if (!isGmailConfigured()) {
       setStatus(gmailSetupHint());
+      return;
     }
-  }, [promptGmail]);
+    if (session?.accessToken) {
+      setSyncing(true);
+      try {
+        await runSync(session.accessToken);
+      } catch (e) {
+        if (isAuthError(e)) {
+          setStatus('Session expired — sign in again to sync…');
+          await startGoogle('sync');
+          return;
+        }
+        setStatus('Sync failed: ' + e.message);
+      } finally {
+        setSyncing(false);
+      }
+      return;
+    }
+    await startGoogle('sync');
+  }, [session, runSync, startGoogle]);
 
   const onReset = useCallback(async () => {
     if (!confirmReset) {
@@ -214,6 +378,26 @@ export default function App() {
   const focusLabel =
     showDayChart && selectedDay ? relativeDay(selectedDay) : null;
 
+  if (!authReady) {
+    return (
+      <View style={[styles.root, styles.centered]}>
+        <StatusBar style="light" />
+        <ActivityIndicator size="large" color={colors.mint} />
+      </View>
+    );
+  }
+
+  if (!session) {
+    return (
+      <LoginScreen
+        onSignIn={onSignIn}
+        loading={syncing}
+        status={status}
+        setupHint={!isGmailConfigured() ? gmailSetupHint() : null}
+      />
+    );
+  }
+
   return (
     <View style={styles.root}>
       <StatusBar style="light" />
@@ -228,11 +412,16 @@ export default function App() {
         }
       >
         <View style={styles.header}>
-          <View>
+          <View style={styles.headerLeft}>
             <Text style={styles.brand}>Spends</Text>
-            <Text style={styles.sub}>Auto-tracked from your bank alerts</Text>
+            <Text style={styles.sub} numberOfLines={1}>
+              {session.email}
+            </Text>
           </View>
           <View style={styles.headerBtns}>
+            <Pressable style={styles.resetBtn} onPress={onLogout}>
+              <Text style={styles.resetText}>Log out</Text>
+            </Pressable>
             <Pressable
               style={[styles.resetBtn, confirmReset && styles.resetBtnArmed]}
               onPress={onReset}
@@ -251,6 +440,12 @@ export default function App() {
             </Pressable>
           </View>
         </View>
+
+        {txs.length === 0 && !syncing ? (
+          <Text style={styles.emptyHint}>
+            No transactions yet. Tap Sync to pull bank alerts from your Gmail.
+          </Text>
+        ) : null}
 
         <PeriodToggle
           value={period}
@@ -315,7 +510,8 @@ export default function App() {
         {isGmailConfigured() && gmailRequest?.redirectUri ? (
           <Text style={styles.status}>
             If Google shows a "redirect_uri_mismatch", add this exact URI in your
-            OAuth client:{'\n'}{gmailRequest.redirectUri}
+            OAuth client:{'\n'}
+            {gmailRequest.redirectUri}
           </Text>
         ) : null}
         <View style={{ height: spacing.xxl }} />
@@ -337,6 +533,7 @@ export default function App() {
 
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.bg },
+  centered: { alignItems: 'center', justifyContent: 'center' },
   content: {
     paddingHorizontal: spacing.lg,
     paddingTop: Platform.OS === 'web' ? spacing.xl : 56,
@@ -349,9 +546,17 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     alignItems: 'flex-start',
     marginBottom: spacing.lg,
+    gap: spacing.sm,
   },
+  headerLeft: { flex: 1, minWidth: 0, paddingRight: spacing.sm },
   brand: { ...type.h1, color: colors.text },
   sub: { ...type.small, color: colors.textFaint, marginTop: 2 },
+  emptyHint: {
+    ...type.small,
+    color: colors.textDim,
+    marginBottom: spacing.lg,
+    lineHeight: 18,
+  },
   syncBtn: {
     borderWidth: 1,
     borderColor: colors.border,
@@ -361,16 +566,26 @@ const styles = StyleSheet.create({
     backgroundColor: colors.surface,
   },
   syncText: { ...type.small, color: colors.mint, fontWeight: '600' },
-  headerBtns: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
+  headerBtns: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    justifyContent: 'flex-end',
+    gap: spacing.sm,
+    maxWidth: '58%',
+  },
   resetBtn: {
     borderWidth: 1,
     borderColor: colors.border,
     borderRadius: radius.pill,
-    paddingHorizontal: spacing.lg,
+    paddingHorizontal: spacing.md,
     paddingVertical: spacing.sm,
     backgroundColor: colors.surface,
   },
-  resetBtnArmed: { borderColor: colors.coral, backgroundColor: 'rgba(255,107,107,0.12)' },
+  resetBtnArmed: {
+    borderColor: colors.coral,
+    backgroundColor: 'rgba(255,107,107,0.12)',
+  },
   resetText: { ...type.small, color: colors.textDim, fontWeight: '600' },
   resetTextArmed: { color: colors.coral },
   focusHint: {

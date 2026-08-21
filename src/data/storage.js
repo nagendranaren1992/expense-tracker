@@ -1,6 +1,5 @@
-// Local persistence for transactions using AsyncStorage.
-// For a first version this is plenty; swap to expo-sqlite later if the list
-// grows into the thousands and you need indexed queries.
+// Per-user local persistence. Keys are namespaced by Google user id so two
+// people on the same device never share transactions.
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { generateMockTransactions } from './mockTransactions';
@@ -9,26 +8,77 @@ import { resolveStoredMerchant, shouldUpgradeMerchant } from '../config/upiMerch
 import { isBadMerchant, isJunkStoredTransaction } from '../services/emailParser';
 import { categorize } from '../services/categories';
 
-const TX_KEY = 'expenses.transactions.v1';
-const META_KEY = 'expenses.meta.v1';
+const LEGACY_TX_KEY = 'expenses.transactions.v1';
+const LEGACY_META_KEY = 'expenses.meta.v1';
+const LEGACY_MIGRATED_KEY = 'expenses.legacyMigrated.v1';
+
+let activeUserId = null;
+
+export function setActiveUser(userId) {
+  activeUserId = userId ? String(userId) : null;
+}
+
+export function getActiveUser() {
+  return activeUserId;
+}
+
+function requireUser() {
+  if (!activeUserId) {
+    throw new Error('No signed-in user — cannot read or write transactions.');
+  }
+  return activeUserId;
+}
+
+function txKey(userId = activeUserId) {
+  return `expenses.${userId}.transactions.v1`;
+}
+
+function metaKey(userId = activeUserId) {
+  return `expenses.${userId}.meta.v1`;
+}
+
+function keepTransaction(t) {
+  return (
+    t &&
+    t.account &&
+    !isBadMerchant(t.merchant) &&
+    !isJunkStoredTransaction(t)
+  );
+}
+
+/** One-time: move pre-auth local data to the first user who signs in on this device. */
+export async function migrateLegacyIfNeeded(userId) {
+  if (!userId) return;
+  try {
+    const already = await AsyncStorage.getItem(LEGACY_MIGRATED_KEY);
+    if (already) return;
+
+    const legacy = await AsyncStorage.getItem(LEGACY_TX_KEY);
+    const userRaw = await AsyncStorage.getItem(txKey(userId));
+    if (legacy && !userRaw) {
+      await AsyncStorage.setItem(txKey(userId), legacy);
+      const legacyMeta = await AsyncStorage.getItem(LEGACY_META_KEY);
+      if (legacyMeta) {
+        await AsyncStorage.setItem(metaKey(userId), legacyMeta);
+      }
+    }
+    await AsyncStorage.setItem(LEGACY_MIGRATED_KEY, String(userId));
+  } catch (e) {
+    console.warn('migrateLegacyIfNeeded failed', e);
+  }
+}
 
 export async function getTransactions() {
   try {
-    const raw = await AsyncStorage.getItem(TX_KEY);
+    const uid = requireUser();
+    const raw = await AsyncStorage.getItem(txKey(uid));
     if (!raw) return [];
     const list = JSON.parse(raw);
     if (!Array.isArray(list)) return [];
-    const known = accountLast4s();
     let changed = false;
     const clean = [];
     for (const t of list) {
-      if (
-        !t ||
-        !t.account ||
-        !known.includes(t.account) ||
-        isBadMerchant(t.merchant) ||
-        isJunkStoredTransaction(t)
-      ) {
+      if (!keepTransaction(t)) {
         changed = true;
         continue;
       }
@@ -37,7 +87,6 @@ export async function getTransactions() {
         t.merchant = label;
         changed = true;
       }
-      // Re-run classifier so rule changes (e.g. UPI vs Transfers) apply on load
       const nextCat = categorize(t.merchant, t.raw || '');
       if (nextCat && nextCat !== t.category) {
         t.category = nextCat;
@@ -46,7 +95,7 @@ export async function getTransactions() {
       clean.push(t);
     }
     if (changed) {
-      await AsyncStorage.setItem(TX_KEY, JSON.stringify(clean));
+      await AsyncStorage.setItem(txKey(uid), JSON.stringify(clean));
     }
     return clean;
   } catch (e) {
@@ -56,10 +105,10 @@ export async function getTransactions() {
 }
 
 export async function saveTransactions(list) {
-  await AsyncStorage.setItem(TX_KEY, JSON.stringify(list));
+  const uid = requireUser();
+  await AsyncStorage.setItem(txKey(uid), JSON.stringify(list));
 }
 
-// Same spend across re-parses (merchant name may improve).
 function softFingerprint(t) {
   return `${String(t.date || '').slice(0, 16)}|${t.amount}|${t.account || ''}|${t.type || ''}`;
 }
@@ -68,13 +117,10 @@ function preferMerchant(oldName, newName) {
   const oldBad = isBadMerchant(oldName) || !oldName || /^(unknown|credit)$/i.test(oldName);
   const newBad = isBadMerchant(newName) || !newName;
   if (oldBad && !newBad) return newName;
-  // Upgrade raw UPI id / generic "Paytm" → friendly name from upiMerchants.js
   if (shouldUpgradeMerchant(oldName, newName)) return newName;
   return null;
 }
 
-// Merge new transactions, skipping ids we already have. Returns the added count.
-// Also upgrades boilerplate merchant names when the same spend is re-synced.
 export async function addTransactions(incoming = []) {
   const existing = await getTransactions();
   const seen = new Set(existing.map((t) => t.id));
@@ -101,7 +147,6 @@ export async function addTransactions(incoming = []) {
         if (t.raw) old.raw = t.raw;
         changed = true;
       }
-      // Migrate to stable id (without merchant).
       if (old.id !== t.id) {
         seen.delete(old.id);
         old.id = t.id;
@@ -119,71 +164,76 @@ export async function addTransactions(incoming = []) {
   }
 
   if (fresh.length === 0) {
-    const pruned = existing.filter(
-      (t) =>
-        t.account &&
-        accountLast4s().includes(t.account) &&
-        !isBadMerchant(t.merchant) &&
-        !isJunkStoredTransaction(t)
-    );
+    const pruned = existing.filter(keepTransaction);
     if (pruned.length !== existing.length || upgraded) {
       await saveTransactions(pruned);
     }
     return 0;
   }
   const merged = [...fresh, ...existing]
-    .filter(
-      (t) =>
-        t.account &&
-        accountLast4s().includes(t.account) &&
-        !isBadMerchant(t.merchant) &&
-        !isJunkStoredTransaction(t)
-    )
+    .filter(keepTransaction)
     .sort((a, b) => new Date(b.date) - new Date(a.date));
   await saveTransactions(merged);
   return fresh.length;
 }
 
 export async function clearAll() {
-  await AsyncStorage.multiRemove([TX_KEY, META_KEY]);
+  const uid = requireUser();
+  await AsyncStorage.multiRemove([txKey(uid), metaKey(uid)]);
 }
 
-// Clear stored transactions but KEEP the seed flag, so sample data does not
-// come back. Use this to wipe bad/stale rows, then re-sync from Gmail.
 export async function clearTransactions() {
-  await AsyncStorage.removeItem(TX_KEY);
+  const uid = requireUser();
+  await AsyncStorage.removeItem(txKey(uid));
 }
 
-// Remove only the seeded sample rows (source: 'sample'), keeping real data.
-// Called after the first successful Gmail sync so only live data remains.
 export async function removeSampleData() {
   const list = await getTransactions();
   const real = list.filter((t) => t.source !== 'sample');
   await saveTransactions(real);
-  return list.length - real.length; // how many samples were removed
+  return list.length - real.length;
 }
 
-// Seed sample data the first time the app runs so the UI isn't empty.
+// Sample seed is opt-in / legacy — new signed-in users start empty until Sync.
 export async function ensureSeeded() {
-  const meta = await AsyncStorage.getItem(META_KEY);
+  const uid = requireUser();
+  const meta = await AsyncStorage.getItem(metaKey(uid));
   if (meta) return;
   const existing = await getTransactions();
   if (existing.length === 0) {
-    await saveTransactions(generateMockTransactions());
+    // Do not auto-seed for multi-user; leave empty until Gmail sync.
+    await AsyncStorage.setItem(
+      metaKey(uid),
+      JSON.stringify({ seededAt: null, initializedAt: new Date().toISOString() })
+    );
+    return;
   }
   await AsyncStorage.setItem(
-    META_KEY,
+    metaKey(uid),
     JSON.stringify({ seededAt: new Date().toISOString() })
   );
 }
 
-// Filter chips: always the user's cards, then any extra last-4s found in data.
+/** Dev helper: fill sample rows for the active user. */
+export async function seedSampleData() {
+  await saveTransactions(generateMockTransactions());
+  const uid = requireUser();
+  await AsyncStorage.setItem(
+    metaKey(uid),
+    JSON.stringify({ seededAt: new Date().toISOString() })
+  );
+}
+
+// Chips: accounts seen in this user's data. Prefer nicknamed cards first.
 export function distinctAccounts(txs) {
-  const set = new Set(accountLast4s());
-  txs.forEach((t) => t.account && set.add(t.account));
-  const configured = accountLast4s();
-  const extra = Array.from(set)
-    .filter((a) => !configured.includes(a))
-    .sort();
-  return [...configured, ...extra];
+  const fromData = [];
+  const seen = new Set();
+  for (const t of txs) {
+    if (!t?.account || seen.has(t.account)) continue;
+    seen.add(t.account);
+    fromData.push(t.account);
+  }
+  const preferred = accountLast4s().filter((a) => seen.has(a));
+  const rest = fromData.filter((a) => !preferred.includes(a)).sort();
+  return [...preferred, ...rest];
 }

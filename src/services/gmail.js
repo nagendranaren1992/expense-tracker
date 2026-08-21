@@ -1,22 +1,21 @@
-// Gmail integration (the "connect my inbox" part).
+// Gmail + Google Sign-In (login gate + bank-alert sync).
 //
-// This is scaffolded and ready, but intentionally OFF until you add your own
-// Google OAuth client IDs below. Until then the app runs on local/sample data.
+// Login and Sync both use the same OAuth clients. Identity scopes identify the
+// user; gmail.readonly pulls transaction alerts. Tokens stay on the device.
 //
 // ─────────────────────────────────────────────────────────────────────────
 // ONE-TIME SETUP (each takes a few minutes):
 // 1. Go to https://console.cloud.google.com/ → create a project.
 // 2. "APIs & Services" → Enable the **Gmail API**.
-// 3. "OAuth consent screen" → External → add your own Google account as a
-//    Test user (keeps it in testing mode; no Google review needed for personal use).
+// 3. "OAuth consent screen" → External → add Google accounts as Test users
+//    (friends you share the app with must be listed while in Testing mode).
 // 4. "Credentials" → Create OAuth client IDs:
 //      - Web application    (for running on web)
 //      - iOS                (bundle id: com.example.expensetracker)
 //      - Android            (package + SHA-1 from `expo credentials`/EAS)
 // 5. Paste the client IDs into CLIENT_IDS below.
 //
-// Scope used is READ-ONLY (gmail.readonly): the app can read messages, never
-// send or delete. Tokens live only on the device.
+// Scope used is READ-ONLY (gmail.readonly) plus openid/email/profile for login.
 // ─────────────────────────────────────────────────────────────────────────
 
 import { Platform } from 'react-native';
@@ -36,7 +35,11 @@ export const CLIENT_IDS = {
   androidClientId: '', // <-- paste Android client ID (required on Android)
 };
 
+// Identity scopes for login + read-only Gmail for bank-alert sync.
 export const GMAIL_SCOPES = [
+  'openid',
+  'profile',
+  'email',
   'https://www.googleapis.com/auth/gmail.readonly',
 ];
 
