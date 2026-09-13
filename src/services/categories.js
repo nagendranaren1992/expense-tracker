@@ -35,10 +35,10 @@ export function isUpiTransaction(merchant = '', raw = '') {
 // Ordered rules: first match wins. Keep specific brands above generic words.
 // UPI is handled in categorize() before these rules.
 const RULES = [
-  { cat: 'food', match: ['zomato', 'swiggy', 'dominos', 'mcdonald', 'kfc', 'starbucks', 'cafe', 'restaurant', 'eatfit', 'faasos', 'behrouz', 'pizza', 'burger', 'chaayos', 'barbeque', 'dineout'] },
+  { cat: 'food', match: ['zomato', 'swiggy', 'dominos', 'mcdonald', 'kfc', 'starbucks', 'cafe', 'restaurant', 'eatfit', 'faasos', 'behrouz', 'pizza', 'burger', 'chaayos', 'barbeque', 'dineout', '7 midway', 'midway palza', 'midway plaza'] },
   { cat: 'ecommerce', match: ['amazon', 'flipkart', 'myntra', 'ajio', 'meesho', 'nykaa', 'snapdeal', 'tatacliq', 'firstcry', 'lenskart'] },
   { cat: 'groceries', match: ['bigbasket', 'blinkit', 'zepto', 'dmart', 'grofers', 'jiomart', 'instamart', 'more retail', 'grocery', 'supermarket', 'reliance fresh', 'spencer'] },
-  { cat: 'fuel', match: ['petrol', 'diesel', 'fuel', 'hpcl', 'iocl', 'bpcl', 'indian oil', 'bharat petroleum', 'hp petrol', 'shell'] },
+  { cat: 'fuel', match: ['petrol', 'diesel', 'fuel', 'hpcl', 'iocl', 'bpcl', 'indian oil', 'bharat petroleum', 'hp petrol', 'shell', 'cyber filling', 'filling station', 'bp mobility', 'reliance bp', 'jio-bp', 'jiobp'] },
   { cat: 'travel', match: ['uber', 'ola', 'rapido', 'irctc', 'makemytrip', 'goibibo', 'cleartrip', 'redbus', 'indigo', 'vistara', 'air india', 'spicejet', 'railway', 'metro', 'yatra', 'oyo', 'airbnb'] },
   { cat: 'entertainment', match: ['netflix', 'spotify', 'hotstar', 'prime video', 'sony liv', 'zee5', 'bookmyshow', 'pvr', 'inox', 'youtube premium', 'gaana', 'jiocinema'] },
   { cat: 'utilities', match: ['electricity', 'water bill', 'gas bill', 'broadband', 'airtel', 'jio', 'vodafone', 'vi ', 'bsnl', 'act fibernet', 'recharge', 'dth', 'tata power', 'bescom', 'postpaid', 'prepaid'] },

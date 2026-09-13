@@ -40,7 +40,14 @@
     "plugins": [
       "expo-web-browser",
       "expo-dev-client",
-      "expo-font"
+      "expo-font",
+      "expo-secure-store",
+      [
+        "expo-local-authentication",
+        {
+          "faceIDPermission": "Unlock Spends with Face ID."
+        }
+      ]
     ]
   }
 }

@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -20,16 +20,20 @@ import {
   DMSans_700Bold,
 } from '@expo-google-fonts/dm-sans';
 import { colors, spacing, radius } from '../theme';
+import { getUnlockLabel } from '../services/auth';
 
 const heroImage = require('../../assets/login-hero.png');
 const markImage = require('../../assets/favicon.png');
 
-export default function LoginScreen({ onSignIn, loading, status, setupHint }) {
+export default function LoginScreen({ onUnlock, loading, status }) {
   const { width } = useWindowDimensions();
   const wide = width >= 860;
   const fade = useRef(new Animated.Value(0)).current;
   const rise = useRef(new Animated.Value(18)).current;
   const ctaPulse = useRef(new Animated.Value(1)).current;
+  const [unlockLabel, setUnlockLabel] = useState(
+    Platform.OS === 'web' ? 'Continue' : 'Unlock'
+  );
 
   const [fontsLoaded] = useFonts({
     Fraunces_600SemiBold,
@@ -37,6 +41,17 @@ export default function LoginScreen({ onSignIn, loading, status, setupHint }) {
     DMSans_500Medium,
     DMSans_700Bold,
   });
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const label = await getUnlockLabel();
+      if (!cancelled) setUnlockLabel(label);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     Animated.parallel([
@@ -127,8 +142,8 @@ export default function LoginScreen({ onSignIn, loading, status, setupHint }) {
             </Text>
 
             <Text style={[styles.support, bodyFont]}>
-              Sign in once. We read your bank alert emails — nothing else — and
-              turn them into a clear daily and weekly spend picture.
+              Unlock with your device — Face ID, fingerprint, or passcode. We
+              turn bank alert emails into a clear daily and weekly spend picture.
             </Text>
 
             <Animated.View
@@ -140,36 +155,27 @@ export default function LoginScreen({ onSignIn, loading, status, setupHint }) {
                   pressed && !loading && styles.btnPressed,
                   loading && styles.btnDisabled,
                 ]}
-                onPress={onSignIn}
+                onPress={() => onUnlock?.()}
                 disabled={loading}
                 accessibilityRole="button"
-                accessibilityLabel="Continue with Google"
+                accessibilityLabel={unlockLabel}
               >
                 {loading ? (
                   <ActivityIndicator color={colors.bg} />
                 ) : (
-                  <View style={styles.btnInner}>
-                    <View style={styles.googleBadge}>
-                      <Text style={styles.googleG}>G</Text>
-                    </View>
-                    <Text style={[styles.btnText, boldFont]}>
-                      Continue with Google
-                    </Text>
-                  </View>
+                  <Text style={[styles.btnText, boldFont]}>{unlockLabel}</Text>
                 )}
               </Pressable>
             </Animated.View>
 
             <Text style={[styles.trust, bodyFont]}>
-              Read-only Gmail access · Data stays on this device under your
-              account
+              {Platform.OS === 'web'
+                ? 'On web there is no device biometrics — continue to open the app'
+                : 'Protected by this device · Data stays on this device'}
             </Text>
 
             {!!status && (
               <Text style={[styles.status, mediumFont]}>{status}</Text>
-            )}
-            {!!setupHint && (
-              <Text style={[styles.status, bodyFont]}>{setupHint}</Text>
             )}
           </Animated.View>
 
@@ -267,25 +273,6 @@ const styles = StyleSheet.create({
     opacity: 0.9,
   },
   btnDisabled: { opacity: 0.7 },
-  btnInner: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-  },
-  googleBadge: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
-    backgroundColor: colors.white,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  googleG: {
-    color: '#4285F4',
-    fontSize: 15,
-    fontWeight: '700',
-    marginTop: -1,
-  },
   btnText: {
     fontSize: 16,
     color: colors.bg,

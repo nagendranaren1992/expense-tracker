@@ -5,3 +5,11 @@ web-build/
 npm-debug.*
 *.log
 .DS_Store
+
+# Secrets & personal financial config — never commit
+.env
+.env.*
+!.env.example
+src/config/*.local.js
+src/config/accounts.local.js
+src/config/upiMerchants.local.js

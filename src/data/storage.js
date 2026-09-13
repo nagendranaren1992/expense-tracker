@@ -7,6 +7,7 @@ import { accountLast4s } from '../config/accounts';
 import { resolveStoredMerchant, shouldUpgradeMerchant } from '../config/upiMerchants';
 import { isBadMerchant, isJunkStoredTransaction } from '../services/emailParser';
 import { categorize } from '../services/categories';
+import { repairUsdTransactions } from '../services/fx';
 
 const LEGACY_TX_KEY = 'expenses.transactions.v1';
 const LEGACY_META_KEY = 'expenses.meta.v1';
@@ -76,24 +77,32 @@ export async function getTransactions() {
     const list = JSON.parse(raw);
     if (!Array.isArray(list)) return [];
     let changed = false;
-    const clean = [];
+    const kept = [];
     for (const t of list) {
       if (!keepTransaction(t)) {
         changed = true;
         continue;
       }
-      const label = resolveStoredMerchant(t) || t.merchant;
-      if (label && label !== t.merchant) {
-        t.merchant = label;
-        changed = true;
-      }
-      const nextCat = categorize(t.merchant, t.raw || '');
-      if (nextCat && nextCat !== t.category) {
-        t.category = nextCat;
-        changed = true;
-      }
-      clean.push(t);
+      kept.push(t);
     }
+
+    let clean = await repairUsdTransactions(kept);
+    if (clean.some((row, i) => row !== kept[i])) changed = true;
+
+    clean = clean.map((row) => {
+      let next = row;
+      const label = resolveStoredMerchant(row) || row.merchant;
+      if (label && label !== row.merchant) {
+        next = { ...next, merchant: label };
+        changed = true;
+      }
+      const nextCat = categorize(next.merchant, next.raw || '');
+      if (nextCat && nextCat !== next.category) {
+        next = { ...next, category: nextCat };
+        changed = true;
+      }
+      return next;
+    });
     if (changed) {
       await AsyncStorage.setItem(txKey(uid), JSON.stringify(clean));
     }
@@ -113,12 +122,77 @@ function softFingerprint(t) {
   return `${String(t.date || '').slice(0, 16)}|${t.amount}|${t.account || ''}|${t.type || ''}`;
 }
 
+function merchantNorm(name) {
+  return String(name || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '');
+}
+
+/** Same card + day + type + similar merchant — used to replace limit-as-amount USD misparses. */
+function findUsdMisparseTwin(existing, incoming) {
+  if (String(incoming.originalCurrency || '').toUpperCase() !== 'USD') return null;
+  const day = String(incoming.date || '').slice(0, 10);
+  const mIn = merchantNorm(incoming.merchant);
+  if (!day || !incoming.account || !mIn) return null;
+
+  return (
+    existing.find((e) => {
+      if (!e || e.id === incoming.id) return false;
+      if (e.account !== incoming.account || e.type !== incoming.type) return false;
+      if (String(e.date || '').slice(0, 10) !== day) return false;
+      const mEx = merchantNorm(e.merchant);
+      if (!mEx) return false;
+      const similar =
+        mEx.includes(mIn) ||
+        mIn.includes(mEx) ||
+        (mEx.length >= 6 && mIn.length >= 6 && (mEx.startsWith(mIn.slice(0, 6)) || mIn.startsWith(mEx.slice(0, 6))));
+      if (!similar) return false;
+      // Old row looks like available-limit INR; new is the converted USD spend.
+      return Number(e.amount) > Number(incoming.amount) * 1.5;
+    }) || null
+  );
+}
+
 function preferMerchant(oldName, newName) {
   const oldBad = isBadMerchant(oldName) || !oldName || /^(unknown|credit)$/i.test(oldName);
   const newBad = isBadMerchant(newName) || !newName;
   if (oldBad && !newBad) return newName;
   if (shouldUpgradeMerchant(oldName, newName)) return newName;
   return null;
+}
+
+function applyIncomingOnto(old, t) {
+  let changed = false;
+  if (!old.account && t.account) {
+    old.account = t.account;
+    changed = true;
+  }
+  const better = preferMerchant(old.merchant, t.merchant);
+  if (better) {
+    old.merchant = better;
+    if (t.category) old.category = t.category;
+    changed = true;
+  }
+  if (t.raw && (!old.raw || t.raw.length >= (old.raw || '').length)) {
+    old.raw = t.raw;
+    changed = true;
+  }
+  if (
+    t.originalCurrency &&
+    t.currency === 'INR' &&
+    (old.amount !== t.amount ||
+      old.originalCurrency !== t.originalCurrency ||
+      old.originalAmount !== t.originalAmount)
+  ) {
+    old.amount = t.amount;
+    old.currency = t.currency;
+    old.originalAmount = t.originalAmount;
+    old.originalCurrency = t.originalCurrency;
+    if (t.fxRate != null) old.fxRate = t.fxRate;
+    if (t.fxDate) old.fxDate = t.fxDate;
+    changed = true;
+  }
+  return changed;
 }
 
 export async function addTransactions(incoming = []) {
@@ -132,27 +206,20 @@ export async function addTransactions(incoming = []) {
     if (!t || !t.id) continue;
 
     const soft = softFingerprint(t);
-    const old = bySoft.get(soft) || (seen.has(t.id) ? existing.find((e) => e.id === t.id) : null);
+    let old =
+      bySoft.get(soft) ||
+      (seen.has(t.id) ? existing.find((e) => e.id === t.id) : null) ||
+      findUsdMisparseTwin(existing, t);
 
     if (old) {
-      let changed = false;
-      if (!old.account && t.account) {
-        old.account = t.account;
-        changed = true;
-      }
-      const better = preferMerchant(old.merchant, t.merchant);
-      if (better) {
-        old.merchant = better;
-        if (t.category) old.category = t.category;
-        if (t.raw) old.raw = t.raw;
-        changed = true;
-      }
+      let changed = applyIncomingOnto(old, t);
       if (old.id !== t.id) {
         seen.delete(old.id);
         old.id = t.id;
         seen.add(t.id);
         changed = true;
       }
+      bySoft.set(softFingerprint(old), old);
       if (changed) upgraded = true;
       continue;
     }
@@ -185,6 +252,12 @@ export async function clearAll() {
 export async function clearTransactions() {
   const uid = requireUser();
   await AsyncStorage.removeItem(txKey(uid));
+  try {
+    const { clearGmailSeenIds } = await import('../services/gmail');
+    await clearGmailSeenIds();
+  } catch (e) {
+    console.warn('clearGmailSeenIds failed', e);
+  }
 }
 
 export async function removeSampleData() {

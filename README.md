@@ -60,22 +60,31 @@ Key files:
 ## Connecting your real inbox (Gmail)
 
 The app is wired for Gmail with **read-only** access — it can read messages,
-never send or delete, and tokens stay on your device.
+never send or delete. Tokens are stored in **SecureStore** on device (not
+plaintext AsyncStorage).
 
-1. Open `src/services/gmail.js` and follow the setup comment at the top:
-   create a Google Cloud project, enable the **Gmail API**, add yourself as a
-   test user, and create OAuth client IDs (Web / iOS / Android).
-2. Paste the client IDs into `CLIENT_IDS`.
-3. Wire the `useGmailAuth()` hook + `fetchAndParse()` into the Sync button
-   (there's a commented pattern in `App.js`'s `onRefresh`).
-
-Once configured, pull-to-refresh (or the Sync button) fetches recent bank
-alerts, parses them, de-duplicates, and stores them.
+1. Copy `.env.example` → `.env` and paste your OAuth client IDs
+   (`EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID`, etc.).
+2. Google Cloud: enable **Gmail API**, OAuth consent screen (test users only),
+   create Web / iOS / Android OAuth clients.
+3. Copy personal config (never commit these):
+   - `src/config/accounts.example.js` → `accounts.local.js` (card last-4 labels)
+   - `src/config/upiMerchants.example.js` → `upiMerchants.local.js` (UPI display names)
+4. Unlock the app with **Face ID / fingerprint / device passcode**, then tap
+   **Sync** to connect Gmail and pull bank alerts.
 
 ### Filtering by account
 Pass the **last 4 digits** — the parser already extracts them from each alert,
 and the account chips at the top of the dashboard let you filter to one card /
 account.
+
+### Security notes
+- Do **not** commit `.env`, `*.local.js`, or any TOTP/shared secrets.
+- If this repo was ever public with real cards/UPI/TOTP, treat those as
+  compromised: rotate OAuth clients if needed, scrub git history, and prefer
+  making the repo **private**.
+- App lock uses `expo-local-authentication` — there is no shared unlock secret
+  in the codebase.
 
 ---
 

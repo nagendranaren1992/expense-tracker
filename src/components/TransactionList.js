@@ -41,6 +41,9 @@ export default function TransactionList({ transactions }) {
                 {t.account ? `  ·  ${accountLabel(t.account)}` : ''}
                 {'  ·  '}
                 {relativeDay(t.date)}, {prettyTime(t.date)}
+                {t.originalCurrency && t.originalCurrency !== 'INR'
+                  ? `  ·  ${t.originalCurrency} ${Number(t.originalAmount).toFixed(2)}`
+                  : ''}
               </Text>
             </View>
             <Text style={[styles.amount, { color: isCredit ? colors.mint : colors.text }]}>

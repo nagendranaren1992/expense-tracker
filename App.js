@@ -37,12 +37,14 @@ import {
   useGmailAuth,
   fetchAndParse,
   gmailSetupHint,
+  clearGmailSeenIds,
 } from './src/services/gmail';
 import {
   getSession,
   saveSession,
   clearSession,
-  fetchGoogleProfile,
+  unlockWithDeviceAuth,
+  LOCAL_USER_ID,
   isAuthError,
 } from './src/services/auth';
 
@@ -68,7 +70,7 @@ export default function App() {
   const [syncing, setSyncing] = useState(false);
   const [confirmReset, setConfirmReset] = useState(false);
   const [status, setStatus] = useState('');
-  const authIntentRef = useRef(null); // 'login' | 'sync'
+  const [unlocking, setUnlocking] = useState(false);
   // expo-auth-session keeps the last success response; without these, Log out
   // clears session then the effect re-runs and signs the user straight back in.
   const acceptAuthRef = useRef(true);
@@ -88,38 +90,45 @@ export default function App() {
     setTxs(list);
   }, []);
 
-  // Restore session on launch
+  // Session exists on disk, but the app stays locked until device auth succeeds.
   useEffect(() => {
-    (async () => {
-      try {
-        const s = await getSession();
-        if (s?.userId) {
-          setActiveUser(s.userId);
-          await migrateLegacyIfNeeded(s.userId);
-          setSession(s);
-          await ensureSeeded();
-          const list = await getTransactions();
-          setTxs(list);
-        }
-      } catch (e) {
-        console.warn('session restore failed', e);
-      } finally {
-        setAuthReady(true);
-      }
-    })();
+    setAuthReady(true);
   }, []);
 
-  const applySession = useCallback(async (profile, accessToken) => {
+  const enterWithSession = useCallback(async (s) => {
+    setActiveUser(s.userId);
+    await migrateLegacyIfNeeded(s.userId);
+    setSession(s);
+    await ensureSeeded();
+    const list = await getTransactions();
+    setTxs(list);
+  }, []);
+
+  const unlockLocal = useCallback(async () => {
+    const existing = await getSession();
+    if (existing?.userId) {
+      await enterWithSession(existing);
+      return existing;
+    }
     const next = {
-      userId: profile.userId,
-      email: profile.email,
-      name: profile.name,
-      picture: profile.picture,
-      accessToken: accessToken || undefined,
+      userId: LOCAL_USER_ID,
+      email: 'local',
+      name: 'Spends',
       signedInAt: new Date().toISOString(),
     };
-    setActiveUser(next.userId);
-    await migrateLegacyIfNeeded(next.userId);
+    await saveSession(next);
+    await enterWithSession(next);
+    return next;
+  }, [enterWithSession]);
+
+  const persistGmailToken = useCallback(async (accessToken) => {
+    const current = sessionRef.current;
+    if (!current) return null;
+    const next = {
+      ...current,
+      accessToken: accessToken || undefined,
+      signedInAt: current.signedInAt || new Date().toISOString(),
+    };
     await saveSession(next);
     setSession(next);
     return next;
@@ -140,13 +149,19 @@ export default function App() {
 
       if (parsed.length > 0) {
         setStatus(
-          `Scanned ${result.scanned} email${result.scanned === 1 ? '' : 's'}, ` +
-            `loaded ${added} transaction${added === 1 ? '' : 's'}.`
+          `Scanned ${result.scanned} email${result.scanned === 1 ? '' : 's'}` +
+            (result.fetched != null ? ` · fetched ${result.fetched} new` : '') +
+            `, loaded ${added} transaction${added === 1 ? '' : 's'}.`
         );
       } else if (result.scanned === 0) {
         setStatus(
           'No bank alert emails found in the last 14 days. Your bank may send from ' +
             "an address the app doesn't know yet — tell me the sender and I'll add it."
+        );
+      } else if (result.skippedSeen > 0 && result.fetched === 0) {
+        setStatus(
+          `Already up to date — ${result.skippedSeen} email${result.skippedSeen === 1 ? '' : 's'} ` +
+            'already synced (1 search, no extra fetches).'
         );
       } else {
         setStatus(
@@ -162,6 +177,7 @@ export default function App() {
     const run = async () => {
       if (!gmailResponse) return;
       if (!acceptAuthRef.current) return;
+      if (!sessionRef.current) return;
 
       const authKey = [
         gmailResponse.type,
@@ -176,79 +192,76 @@ export default function App() {
       if (gmailResponse.type === 'success') {
         const token = gmailResponse.authentication?.accessToken;
         if (!token) {
-          setStatus('Signed in, but no access token came back.');
+          setStatus('Connected, but no access token came back.');
           setSyncing(false);
-          authIntentRef.current = null;
           return;
         }
         try {
-          setStatus('Signing you in…');
-          const profile = await fetchGoogleProfile(token);
+          setStatus('Connected. Syncing your bank alerts…');
+          await persistGmailToken(token);
           if (epoch !== authEpochRef.current || !acceptAuthRef.current) return;
-          const currentUserId = sessionRef.current?.userId;
-          if (currentUserId && profile.userId !== currentUserId) {
-            setStatus(
-              'That Google account is different from the one signed in. Log out first to switch.'
-            );
-            return;
-          }
-          await applySession(profile, token);
-          if (epoch !== authEpochRef.current || !acceptAuthRef.current) return;
-
-          const intent = authIntentRef.current || 'sync';
-          if (intent === 'login') {
-            setStatus('Signed in. Syncing your bank alerts…');
-          }
           await runSync(token, epoch);
         } catch (e) {
           if (epoch === authEpochRef.current && acceptAuthRef.current) {
-            setStatus('Sign-in / sync failed: ' + e.message);
+            setStatus('Sync failed: ' + e.message);
           }
         } finally {
           if (epoch === authEpochRef.current) {
             setSyncing(false);
-            authIntentRef.current = null;
           }
         }
       } else if (gmailResponse.type === 'error') {
-        setStatus('Google sign-in error: ' + (gmailResponse.error?.message || 'unknown'));
+        setStatus('Google connect error: ' + (gmailResponse.error?.message || 'unknown'));
         setSyncing(false);
-        authIntentRef.current = null;
       } else if (
         gmailResponse.type === 'dismiss' ||
         gmailResponse.type === 'cancel'
       ) {
-        setStatus('Sign-in cancelled.');
+        setStatus('Gmail connect cancelled.');
         setSyncing(false);
-        authIntentRef.current = null;
       }
     };
     run();
-  }, [gmailResponse, applySession, runSync]);
+  }, [gmailResponse, persistGmailToken, runSync]);
 
-  const startGoogle = useCallback(
-    async (intent) => {
-      if (!isGmailConfigured()) {
-        setStatus(gmailSetupHint());
+  const startGmailConnect = useCallback(async () => {
+    if (!isGmailConfigured()) {
+      setStatus(gmailSetupHint());
+      return;
+    }
+    acceptAuthRef.current = true;
+    lastHandledAuthRef.current = null;
+    setSyncing(true);
+    setStatus('Opening Google to connect Gmail…');
+    await promptGmail();
+  }, [promptGmail]);
+
+  const onUnlock = useCallback(async () => {
+    setUnlocking(true);
+    setStatus('');
+    try {
+      const result = await unlockWithDeviceAuth();
+      if (!result.success) {
+        setStatus(
+          result.error === 'user_cancel' || result.error === 'system_cancel'
+            ? 'Unlock cancelled.'
+            : 'Could not unlock. Try Face ID, fingerprint, or your device passcode.'
+        );
         return;
       }
-      acceptAuthRef.current = true;
-      lastHandledAuthRef.current = null;
-      authIntentRef.current = intent;
-      setSyncing(true);
-      setStatus(intent === 'login' ? 'Opening Google sign-in…' : 'Opening Google…');
-      await promptGmail();
-    },
-    [promptGmail]
-  );
-
-  const onSignIn = useCallback(() => startGoogle('login'), [startGoogle]);
+      await unlockLocal();
+      setStatus('');
+    } catch (e) {
+      setStatus('Unlock failed: ' + e.message);
+    } finally {
+      setUnlocking(false);
+    }
+  }, [unlockLocal]);
 
   const onLogout = useCallback(async () => {
     // Ignore sticky OAuth success + any in-flight sync so we stay on login.
     acceptAuthRef.current = false;
     authEpochRef.current += 1;
-    authIntentRef.current = null;
     if (gmailResponse) {
       lastHandledAuthRef.current = [
         gmailResponse.type,
@@ -257,6 +270,7 @@ export default function App() {
       ].join('|');
     }
     setSyncing(false);
+    setUnlocking(false);
     await clearSession();
     setActiveUser(null);
     setSession(null);
@@ -284,8 +298,8 @@ export default function App() {
         await runSync(session.accessToken);
       } catch (e) {
         if (isAuthError(e)) {
-          setStatus('Session expired — sign in again to sync…');
-          await startGoogle('sync');
+          setStatus('Gmail session expired — connect again to sync…');
+          await startGmailConnect();
           return;
         }
         setStatus('Sync failed: ' + e.message);
@@ -294,8 +308,8 @@ export default function App() {
       }
       return;
     }
-    await startGoogle('sync');
-  }, [session, runSync, startGoogle]);
+    await startGmailConnect();
+  }, [session, runSync, startGmailConnect]);
 
   const onReset = useCallback(async () => {
     if (!confirmReset) {
@@ -390,10 +404,9 @@ export default function App() {
   if (!session) {
     return (
       <LoginScreen
-        onSignIn={onSignIn}
-        loading={syncing}
+        onUnlock={onUnlock}
+        loading={unlocking}
         status={status}
-        setupHint={!isGmailConfigured() ? gmailSetupHint() : null}
       />
     );
   }
@@ -415,23 +428,38 @@ export default function App() {
           <View style={styles.headerLeft}>
             <Text style={styles.brand}>Spends</Text>
             <Text style={styles.sub} numberOfLines={1}>
-              {session.email}
+              {session.email && session.email !== 'local'
+                ? session.email
+                : 'Unlocked'}
             </Text>
           </View>
           <View style={styles.headerBtns}>
-            <Pressable style={styles.resetBtn} onPress={onLogout}>
+            <Pressable
+              style={styles.resetBtn}
+              onPress={onLogout}
+              accessibilityRole="button"
+              accessibilityLabel="Log out"
+            >
               <Text style={styles.resetText}>Log out</Text>
             </Pressable>
             <Pressable
               style={[styles.resetBtn, confirmReset && styles.resetBtnArmed]}
               onPress={onReset}
               disabled={syncing}
+              accessibilityRole="button"
+              accessibilityLabel={confirmReset ? 'Confirm reset transactions' : 'Reset transactions'}
             >
               <Text style={[styles.resetText, confirmReset && styles.resetTextArmed]}>
                 {confirmReset ? 'Confirm?' : 'Reset'}
               </Text>
             </Pressable>
-            <Pressable style={styles.syncBtn} onPress={onSync} disabled={syncing}>
+            <Pressable
+              style={styles.syncBtn}
+              onPress={onSync}
+              disabled={syncing}
+              accessibilityRole="button"
+              accessibilityLabel="Sync bank alerts from Gmail"
+            >
               {syncing ? (
                 <ActivityIndicator size="small" color={colors.mint} />
               ) : (

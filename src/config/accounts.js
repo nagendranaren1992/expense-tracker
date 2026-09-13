@@ -1,14 +1,21 @@
 // Optional nicknames for cards you know by last-4.
-// Other users discover accounts from their synced emails; unknown last-4s
-// still show as •••• 1234. Add entries here only for nicer chip labels.
+// Real last-4s belong in accounts.local.js (gitignored) — never commit them.
+// Copy accounts.example.js → accounts.local.js and fill in your cards.
 
-export const MY_ACCOUNTS = [
-  { last4: '6008', label: 'ICICI', type: 'credit' },
-  { last4: '7773', label: 'HDFC', type: 'credit' },
-  { last4: '2358', label: 'HSBC', type: 'credit' },
-  { last4: '3471', label: 'BOBCARD', type: 'credit' },
-  { last4: '7023', label: 'BOBCARD', type: 'credit' },
-];
+import { MY_ACCOUNTS as EXAMPLE_ACCOUNTS } from './accounts.example';
+
+let localAccounts = null;
+try {
+  // Resolved via metro.config.js — falls back to example if missing.
+  localAccounts = require('./accounts.local').MY_ACCOUNTS;
+} catch {
+  localAccounts = null;
+}
+
+export const MY_ACCOUNTS =
+  Array.isArray(localAccounts) && localAccounts.length > 0
+    ? localAccounts
+    : EXAMPLE_ACCOUNTS;
 
 export function accountLast4s() {
   return MY_ACCOUNTS.map((a) => a.last4);
@@ -22,7 +29,6 @@ export function accountLabel(last4) {
   if (!last4) return 'Unknown account';
   const a = MY_ACCOUNTS.find((x) => x.last4 === last4);
   if (!a) return `•••• ${last4}`;
-  // Duplicate names (two BOBCARDs) get last-4 so chips stay distinct.
   return labelCount(a.label) > 1 ? `${a.label} ••${last4}` : a.label;
 }
 

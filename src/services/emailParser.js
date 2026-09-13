@@ -9,7 +9,6 @@ import { MY_ACCOUNTS } from '../config/accounts';
 import { lookupUpiMerchant } from '../config/upiMerchants';
 
 // ---- Amount --------------------------------------------------------------
-const AMOUNT_RE = /(?:rs\.?|inr|₹)\s*([\d,]+(?:\.\d{1,2})?)/i;
 // Prefer the spend amount when the mail also lists available limit / amount due.
 const TXN_AMOUNT_RE =
   /(?:transaction of|used for(?: a transaction of)?|spent|debited|charged|payment\s+of)\s*(?:of\s*)?(?:rs\.?|inr|₹)\s*([\d,]+(?:\.\d{1,2})?)/i;
@@ -17,18 +16,82 @@ const TXN_AMOUNT_RE =
 const AMOUNT_THEN_DEBIT_RE =
   /(?:rs\.?|inr|₹)\s*([\d,]+(?:\.\d{1,2})?)\s+(?:has\s+been\s+|was\s+)?(?:debited|spent|charged|paid)\b/i;
 
+// Foreign currency (ICICI international / SI alerts: "USD. 29.49", "USD 29.49")
+const USD_TXN_AMOUNT_RE =
+  /(?:transaction of|used for(?: a transaction of)?|spent|debited|charged|payment\s+of|maximum amount)\s*(?:of\s*)?(?:usd\.?|us\$)\s*([\d,]+(?:\.\d{1,2})?)/i;
+const USD_AMOUNT_THEN_DEBIT_RE =
+  /(?:usd\.?|us\$)\s*([\d,]+(?:\.\d{1,2})?)\s+(?:has\s+been\s+|was\s+)?(?:debited|spent|charged|paid)\b/i;
+const USD_AMOUNT_RE = /(?:usd\.?|us\$)\s*([\d,]+(?:\.\d{1,2})?)/i;
+// Bare $ only when clearly a spend line (avoid matching random $ in footers)
+const DOLLAR_TXN_RE =
+  /(?:transaction of|spent|debited|charged|payment\s+of)\s*(?:of\s*)?\$\s*([\d,]+(?:\.\d{1,2})?)/i;
+
+/**
+ * @returns {{ amount: number, currency: 'INR'|'USD' }|null}
+ */
 function extractAmount(text) {
-  const preferred = text.match(TXN_AMOUNT_RE) || text.match(AMOUNT_THEN_DEBIT_RE);
-  if (preferred) return cleanAmount(preferred[1]);
-  const m = text.match(AMOUNT_RE);
-  return m ? cleanAmount(m[1]) : null;
+  const preferredInr = text.match(TXN_AMOUNT_RE) || text.match(AMOUNT_THEN_DEBIT_RE);
+  const preferredUsd =
+    text.match(USD_TXN_AMOUNT_RE) ||
+    text.match(USD_AMOUNT_THEN_DEBIT_RE) ||
+    text.match(DOLLAR_TXN_RE);
+  const usd = text.match(USD_AMOUNT_RE);
+
+  // Explicit spend-line INR (bank already billed in rupees).
+  if (preferredInr) {
+    return { amount: cleanAmount(preferredInr[1]), currency: 'INR' };
+  }
+  // USD spend / bare USD beats bare INR — ICICI mails often quote available
+  // credit as Rs.… alongside a USD. 29.49 international charge.
+  if (preferredUsd) {
+    return { amount: cleanAmount(preferredUsd[1]), currency: 'USD' };
+  }
+  if (usd) {
+    return { amount: cleanAmount(usd[1]), currency: 'USD' };
+  }
+
+  const inr = findBareInrAmount(text);
+  if (inr != null) return { amount: inr, currency: 'INR' };
+  return null;
+}
+
+/** Skip Rs./INR figures next to limit / due / outstanding (not the spend). */
+function findBareInrAmount(text) {
+  const re = /(?:rs\.?|inr|₹)\s*([\d,]+(?:\.\d{1,2})?)/gi;
+  let m;
+  while ((m = re.exec(text))) {
+    const start = Math.max(0, m.index - 48);
+    const end = Math.min(text.length, m.index + m[0].length + 24);
+    const ctx = text.slice(start, end).toLowerCase();
+    if (
+      /available\s+(?:credit\s+)?limit|credit\s+limit|available\s+balance|total\s+outstanding|outstanding\s+(?:balance|amount)|amount\s+due|minimum\s+due|payment\s+due/.test(
+        ctx
+      )
+    ) {
+      continue;
+    }
+    return cleanAmount(m[1]);
+  }
+  return null;
+}
+
+/** Pull a USD figure from stored raw text (for repairing mis-parsed rows). */
+export function extractUsdFromText(text = '') {
+  const preferred =
+    String(text).match(USD_TXN_AMOUNT_RE) ||
+    String(text).match(USD_AMOUNT_THEN_DEBIT_RE) ||
+    String(text).match(DOLLAR_TXN_RE) ||
+    String(text).match(USD_AMOUNT_RE);
+  if (!preferred) return null;
+  const amount = cleanAmount(preferred[1]);
+  return amount > 0 ? amount : null;
 }
 
 // ---- Debit vs credit -----------------------------------------------------
 // HDFC InstaAlert: "A payment was made using your Credit Card" / "Payment of Rs.…"
 // Avoid bare "using"/"used" — promo mailers say "using your … Credit Card 7773".
 const DEBIT_RE =
-  /\b(debited|spent|withdrawn|purchase|purchased|paid|sent|charged|deducted)\b|used for|has been done|payment\s+was\s+made|payment\s+of\s*(?:rs\.?|inr|₹)/i;
+  /\b(debited|spent|withdrawn|purchase|purchased|paid|sent|charged|deducted)\b|used for|has been done|payment\s+was\s+made|payment\s+of\s*(?:rs\.?|inr|₹|usd\.?|us\$|\$)/i;
 const CREDIT_RE = /\b(credited|received|refund|deposited)\b/;
 
 // ---- Shared not-a-transaction guard (all banks) -------------------------
@@ -196,6 +259,8 @@ const MERCHANT_PATTERNS = [
   // ICICI: "Info: KPN FF 2049 MADHAVAPURI"
   /\binfo\s*:\s*([A-Z0-9][A-Za-z0-9&.\-'*/ ]{2,60}?)(?:\s*[.|]|\s+never\b|\s+if\b|\s*$)/i,
   /\binfo\s*:\s*([A-Z0-9][A-Za-z0-9&.\-'*/ ]{2,60})/i,
+  // ICICI SI / international: "Merchant Name: TPLINKGLOBALINC"
+  /\bmerchant\s+name\s*:\s*([A-Za-z0-9][A-Za-z0-9&.\-'*/ ]{1,60}?)(?=\s*(?:maximum|frequency|start date|end date|mandate|amount|never|\n|$)|[.;])/i,
   /paid\s+to\s+([a-z0-9.\-_]+@[a-z0-9.\-_]+)/i,
   /paid\s+to\s+([A-Z0-9][A-Za-z0-9&.\-'* ]{2,60}?)(?:\s*(?:on|dated|date|upi|ref|txn|\.|$))/i,
   /(?:vpa|upi(?:\s*id)?|upi\s*handle)[:\s]+([a-z0-9.\-_]+@[a-z0-9.\-_]+)/i,
@@ -368,8 +433,8 @@ export function parseTransactionEmail(email) {
   // Shared skips: statements / offers / EMI / due notices.
   if (isNonTransaction(text)) return null;
 
-  const amount = extractAmount(text);
-  if (!amount || amount <= 0) return null;
+  const extracted = extractAmount(text);
+  if (!extracted || !extracted.amount || extracted.amount <= 0) return null;
 
   const type = detectType(text);
   if (!type) return null;
@@ -383,18 +448,24 @@ export function parseTransactionEmail(email) {
   if (isBadMerchant(merchant) && merchant !== 'Credit' && merchant !== 'Unknown') return null;
   const when = date ? new Date(date) : new Date();
   const category = categorize(merchant, text);
+  const { amount, currency } = extracted;
 
   return {
     // Merchant left out of id so re-sync can upgrade a bad name to the real payee.
-    id: makeId([when.toISOString().slice(0, 16), amount, account || '', type]),
+    // Use extracted (pre-FX) amount so re-sync ids stay stable across rate refreshes.
+    id: makeId([when.toISOString().slice(0, 16), amount, account || '', type, currency]),
     amount,
+    currency,
+    ...(currency !== 'INR'
+      ? { originalAmount: amount, originalCurrency: currency }
+      : {}),
     type,
     merchant,
     account,
     category,
     date: when.toISOString(),
     source: bank?.id || guessBank(from) || 'email',
-    raw: text.slice(0, 240),
+    raw: text.slice(0, 600),
   };
 }
 
@@ -405,6 +476,13 @@ function guessBank(from) {
 
 export function parseEmails(emails = []) {
   return emails.map(parseTransactionEmail).filter(Boolean);
+}
+
+/** Async variant that converts any foreign-currency amounts to INR. */
+export async function parseEmailsWithFx(emails = []) {
+  const { applyFxToTransaction } = await import('./fx');
+  const parsed = emails.map(parseTransactionEmail).filter(Boolean);
+  return Promise.all(parsed.map(applyFxToTransaction));
 }
 
 /** Drop already-stored wallet/cashback rows (e.g. Amazon Pay +₹200). */
